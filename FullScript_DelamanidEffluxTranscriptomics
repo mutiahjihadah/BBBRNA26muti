@@ -1,0 +1,300 @@
+#Course: RNA Seq Course by Inbio Indonesia 2026 (BBBRNA 2026)
+#Project: 	Unveiling the response of efflux pump genes to delamanid in Mycobacterium tuberculosis H37Rv: transcriptomic analysis
+#GEO Accession Number: GSE287913 (https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE287913)
+#N sampel: 6 (3 control, 3 delamanid exposed)
+
+##A. Data Cleaning and Preparation
+#1. Check BiocManager and the libraries-> installed
+#2. Load library
+```{r}
+library(DESeq2)
+library(ggplot2)
+library(pheatmap)
+library(GEOquery)
+library(dplyr)
+library(tidyr)
+```
+#3. Load Database
+```{r}
+gse <- getGEO("GSE287913",GSEMatrix=TRUE)
+getGEOSuppFiles("GSE287913")
+```
+#4. Data Cleaning
+```{r}
+#1. Ambil data ekspresi dan metadata dari series matrix
+gse_data <- gse [[1]]
+expression_data <-exprs(gse_data)
+metadata <- pData(gse_data)
+dim(expression_data)
+
+#Cek file yang sudah didownload
+list.files("GSE287913/")
+
+#2. Baca count matrix
+library(readr)
+counts <- read_csv("GSE287913/GSE287913_Expression_Estimation_Delamanid.csv")
+spec(counts) #Buat retrieve full column spec
+dim(counts)
+
+#3. Rapikan data
+#Ubah sebagai data frame
+counts <- as.data.frame(counts)
+dim(counts)
+
+#Jadikan kolom 1 (Gene ID) sebagai row
+rownames(counts) <- counts[,1]
+counts<- counts[,-1]
+
+#4. Cek struktur
+dim(counts)  # Harusnya: jumlah gen x jumlah sampel
+head(counts)
+```
+#5. Buat metadata
+```{r}
+colnames(counts)
+sample_names <-colnames (counts)
+condition <- c("delamanid-treated", "control","delamanid-treated", "control","delamanid-treated", "control" )
+metadata <- data.frame(
+  sample = sample_names,
+  condition= condition
+)
+rownames(metadata)<-sample_names
+print(metadata)
+colnames(counts) == rownames(metadata)
+```
+#6. QC1: Cek Distribusi Data
+```{r}
+#1 Load
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+#2 For ggplot2, ubah data ke format panjang
+counts_long <- counts%>%
+  as.data.frame()%>%
+  mutate(gene=rownames(.)) %>%
+  pivot_longer(cols=-gene, names_to="sample", values_to="count")%>%
+  mutate(type="Data Mentah")
+
+#3. Boxplot(log2)
+ggplot(counts_long, aes(x=sample, y=log2(count+1), fill=sample)) +
+  geom_boxplot()+
+  theme_minimal()+
+  labs (title= "Distribusi Ekspresi Gen per Sampel-Data Mentah", 
+        x= "Sampel",
+        y="Log2(Count+1)") +
+  theme(axis.text.x = element_text(angle=45, hjust = 1))
+  
+```
+#7. Filtering gen dengan reads rendah
+```{r}
+dim(counts)
+keep <-rowSums(counts) >=10
+counts_filtered <- counts[keep,]
+dim(counts_filtered)
+```
+#8. Korelasi Antar Sampel
+```{r}
+library(pheatmap)
+
+#1 Hitung korelasi antar sampel pasca filter
+cor_matrix <-cor(counts_filtered)
+
+#2 Heatmap
+pheatmap(cor_matrix,
+         main= "Korelasi Antar Sampel- Data Mentah",
+         display_numbers= TRUE,
+         number_format= "%.2f",
+         color= colorRampPalette(c("blue", "white", "red"))(50))
+```
+#9 PCA
+```{r}
+# PCA dengan data log2
+log_data <- log2(counts_filtered + 1)
+pca_result <- prcomp(t(log_data), scale. = TRUE)
+
+# Siapkan data frame
+pca_df <- data.frame(
+    PC1 = pca_result$x[,1],
+    PC2 = pca_result$x[,2],
+    condition = metadata$condition
+)
+
+# Hitung persentase varians
+var_explained <- summary(pca_result)$importance[2, 1:2] * 100
+
+# Plot PCA
+ggplot(pca_df, aes(x = PC1, y = PC2, color = condition)) +
+    geom_point(size = 5) +
+    theme_minimal() +
+    labs(title = "PCA Plot (Data Mentah - Log2)",
+         x = paste0("PC1: ", round(var_explained[1], 1), "% variance"),
+         y = paste0("PC2: ", round(var_explained[2], 1), "% variance")) +
+    theme(legend.position = "bottom")
+```
+##B. Normalisasi Data
+#1. Buat data DESEq2
+```{r}
+library(DESeq2)
+
+# Buat DESeq2 object
+counts_rounded <- round(counts_filtered)
+dds <- DESeqDataSetFromMatrix(
+    countData = counts_rounded,
+    colData = metadata,
+    design = ~condition
+)
+
+# Jalankan DESeq2 (normalisasi otomatis!)
+dds <- DESeq(dds)
+
+# Cek size factors
+sizeFactors(dds)
+
+# Ambil data normalisasi untuk visualisasi
+rld <- rlog(dds, blind = FALSE)   # Untuk dataset kecil (≤ 30 sampel)
+# vsd <- vst(dds, blind = FALSE)  # Untuk dataset besar (> 50 sampel)
+```
+#2. Boxplot data hasil normalisasi
+```{r}
+# Ubah data normalisasi ke format panjang
+rld_data <- assay(rld)
+rld_long <- rld_data %>%
+    as.data.frame() %>%
+    mutate(gene = rownames(.)) %>%
+    pivot_longer(cols = -gene, names_to = "sample", values_to = "expression") %>%
+    mutate(type = "Data Normalisasi (rlog)")
+
+# Gabungkan dengan data mentah
+combined_data <- bind_rows(
+    counts_long %>% mutate(value = log2(count + 1)),
+    rld_long %>% mutate(value = expression)
+)
+
+# Boxplot perbandingan
+ggplot(combined_data, aes(x = sample, y = value, fill = type)) +
+    geom_boxplot() +
+    facet_wrap(~ type, scales = "free_y", ncol = 2) +
+    theme_minimal() +
+    labs(title = "Perbandingan Distribusi Ekspresi Gen",
+         subtitle = "Data Mentah vs Data Normalisasi (rlog)",
+         x = "Sampel", y = "Log2 Ekspresi") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+          strip.text = element_text(face = "bold", size = 10),
+          legend.position = "none")
+```
+##C. DEG Analysis
+```{r}
+# Ambil hasil DEG (sesuai urutan kondisi di metadata)
+res <- results(dds, contrast = c("condition", "control","delamanid-treated"))
+
+# Urutkan berdasarkan padj
+res <- res[order(res$padj), ]
+
+# Lihat hasil
+head(res)
+
+# Konversi ke data frame
+res_df <- as.data.frame(res)
+
+# Tambahkan status signifikansi
+res_df$significant <- ifelse(
+    !is.na(res_df$padj) & res_df$padj < 0.05 & abs(res_df$log2FoldChange) > 1,
+    "Signifikan",
+    "Tidak Signifikan"
+)
+
+res_df$direction <- ifelse(
+    !is.na(res_df$padj) & res_df$padj < 0.05 & res_df$log2FoldChange > 1,
+    "Naik",
+    ifelse(
+        !is.na(res_df$padj) & res_df$padj < 0.05 & res_df$log2FoldChange < -1,
+        "Turun",
+        "Tidak Signifikan"
+    )
+)
+
+# Statistik DEG
+sig_genes <- res_df[res_df$significant == "Signifikan", ]
+nrow(sig_genes)
+table(sig_genes$direction)
+
+# Export hasil
+write.csv(res_df, "DEG_results_GSE287913.csv")
+```
+
+##D. Visualization
+```{r}
+#1. Volcano Plot
+# Ambil top 10 gen signifikan
+top_genes <- res_df %>%
+    filter(!is.na(padj) & padj < 0.05 & abs(log2FoldChange) > 1) %>%
+    arrange(padj) %>%
+    head(10)
+
+# Tambahkan kolom label
+res_df$label <- ifelse(rownames(res_df) %in% rownames(top_genes), rownames(res_df), "")
+
+# Buat Volcano Plot
+volcano_plot <- ggplot(res_df, aes(x = log2FoldChange, y = -log10(padj), color = direction)) +
+    geom_point(alpha = 0.6, size = 1.5) +
+    scale_color_manual(
+        values = c("Naik" = "red", "Turun" = "blue", "Tidak Signifikan" = "gray"),
+        name = "Regulasi"
+    ) +
+    geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "black", alpha = 0.5) +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black", alpha = 0.5) +
+    geom_text(aes(label = label), vjust = -0.5, size = 3, check_overlap = TRUE) +
+    labs(
+        title = "Volcano Plot: Untreated vs Delamanide-treated (Top 10 Gen)",
+        x = "Log2 Fold Change",
+        y = "-Log10 Adjusted P-value"
+    ) +
+    theme_minimal() +
+    theme(
+        legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5, face = "bold")
+    )
+
+# Tampilkan
+print(volcano_plot)
+
+# Simpan
+ggsave("volcano_plot_labeled_delamanid.png", volcano_plot, width = 10, height = 7, dpi = 300)
+```
+
+#Heatmap
+```{r}
+# Ambil top 30 gen signifikan
+res_sorted <- res[order(res$padj), ]
+top_genes_heatmap <- rownames(res_sorted)[!is.na(res_sorted$padj)][1:30]
+
+# Ambil data ekspresi
+heatmap_data <- assay(rld)[top_genes_heatmap, ]
+
+# Buat annotation
+annotation_col <- data.frame(
+    Condition = metadata$condition
+)
+rownames(annotation_col) <- colnames(heatmap_data)
+
+# Tampilkan heatmap
+pheatmap(
+    heatmap_data,
+    scale = "row",
+    main = "Heatmap Top 30 DEG pada Treatment Delamanid",
+    clustering_distance_rows = "correlation",
+    clustering_distance_cols = "correlation",
+    clustering_method = "complete",
+    show_rownames = TRUE,
+    show_colnames = TRUE,
+    fontsize_row = 6,
+    fontsize_col = 8,
+    annotation_col = annotation_col,
+    color = colorRampPalette(c("blue", "white", "red"))(50),
+    border_color = NA
+)
+
+# Simpan heatmap yang ada di jendela plots di bagian kanan bawah
+```
+
